@@ -1,0 +1,69 @@
+# OpenScene (pengsongyou/openscene @ 0f369bc) multi-view 2D fused OpenSeg features,
+# as OpenLex3D evaluated it, + RAGMAP adapter, as an "object_mapping" container.
+# See ragmap_adapter/run.py.
+#
+# What runs is the release's 2D-3D fusion (scripts/feature_fusion/replica_openseg.py
+# process_one_scene, fusion_util.py) and voxelization (dataset/voxelization_utils.py),
+# then the OpenLex3D authors' converter (openlex3d/openlex3d @ 8f4efb0,
+# scripts/preprocessing/openscene_to_openlex_format.py). No 3D network runs
+# ("multi-view 2D fused features", OpenLex3D Supp. G), so neither MinkowskiEngine
+# nor a CUDA build of torch is needed: OpenSeg runs in TensorFlow on the GPU and the
+# fusion runs in torch on the CPU, as upstream does (device = cpu).
+#
+# Python 3.9: dataset/voxelization_utils.py does `from collections import Sequence`,
+# which Python 3.10 removed (upstream's environment is Python 3.8). TensorFlow
+# 2.15.1 is built against CUDA 12.2 / cuDNN 8.9, which this base image provides.
+# The OpenSeg exported model is NOT baked in: mount it at /weights
+# (openseg_colab/exported_model = gs://cloud-tpu-checkpoints/detection/projects/openseg/colab/exported_model,
+# the model the OpenScene README points to besides its Google Drive copy).
+ARG CUDA_RUNTIME=nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+FROM ${CUDA_RUNTIME}
+ARG UV_VERSION=0.9.18
+ARG OPENSCENE_GIT_SHA=unknown
+# openlex3d/openlex3d, the toolbox the converter ships in (the commit the evaluator is pinned at).
+ARG OPENLEX3D_SHA=8f4efb055c4f7e5b9d63714b1f90a612fd2f839b
+ENV DEBIAN_FRONTEND=noninteractive \
+    OPENSCENE_ROOT=/opt/openscene \
+    OPENSCENE_GIT_SHA=${OPENSCENE_GIT_SHA} \
+    OPENSCENE_WEIGHTS=/weights \
+    OPENLEX3D_ROOT=/opt/openlex3d \
+    OPENLEX3D_SHA=${OPENLEX3D_SHA} \
+    VIRTUAL_ENV=/opt/openscene/.venv \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    TF_CPP_MIN_LOG_LEVEL=1 \
+    MPLBACKEND=Agg \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/openscene:/opt/openlex3d \
+    PATH=/opt/openscene/.venv/bin:/root/.local/bin:$PATH
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git libgl1 libegl1 libgomp1 libglib2.0-0 libx11-6 libxext6 \
+        libxrender1 libsm6 libusb-1.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --fail --location --silent --show-error https://astral.sh/uv/${UV_VERSION}/install.sh | sh
+RUN uv python install 3.9 \
+    && uv venv --seed --python 3.9 ${VIRTUAL_ENV} \
+    && uv pip install --python ${VIRTUAL_ENV}/bin/python \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-best-match \
+        torch==2.5.1+cpu tensorflow==2.15.1 numpy==1.26.4 imageio==2.36.1 \
+        opencv-python-headless==4.10.0.84 plyfile==1.1 open3d==0.19.0 scipy==1.13.1 tqdm==4.67.1 \
+        seaborn==0.13.2 scikit-learn==1.5.2 omegaconf==2.3.0 pyyaml==6.0.2 \
+    && uv cache clean
+RUN git clone https://github.com/openlex3d/openlex3d.git ${OPENLEX3D_ROOT} \
+    && cd ${OPENLEX3D_ROOT} && git checkout ${OPENLEX3D_SHA} && rm -rf .git
+COPY . /opt/openscene
+WORKDIR /opt/openscene
+RUN cd scripts/feature_fusion && python -c "import tensorflow, torch, open3d, plyfile, imageio, cv2; \
+import replica_openseg, fusion_util; \
+import sys; sys.path.insert(0, '/opt/openscene'); \
+from dataset.voxelization_utils import sparse_quantize; \
+from openlex3d.core.categories import get_color; \
+import ragmap_adapter.run; print('imports ok', tensorflow.__version__, torch.__version__)" \
+    && printf '#!/bin/sh\nexec python -m ragmap_adapter.run "$@"\n' > /usr/local/bin/ragmap-run \
+    && chmod +x /usr/local/bin/ragmap-run && ragmap-run --help >/dev/null
+
+VOLUME ["/weights"]
+ENTRYPOINT ["ragmap-run"]
+CMD ["--help"]
