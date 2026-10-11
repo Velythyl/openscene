@@ -12,12 +12,15 @@
 #
 # Python 3.9: dataset/voxelization_utils.py does `from collections import Sequence`,
 # which Python 3.10 removed (upstream's environment is Python 3.8). TensorFlow
-# 2.15.1 is built against CUDA 12.2 / cuDNN 8.9, which this base image provides.
+# 2.15.1 with its `and-cuda` extra: the CUDA 12.2 / cuDNN 8.9 libraries *and* ptxas /
+# libdevice (nvidia-cuda-nvcc-cu12), which TF needs to JIT-compile kernels it does
+# not ship for the GPU (sha-7e451ec, on the cuDNN runtime image without them, failed
+# on an L40S with "JIT compilation failed: libdevice not found").
 # The OpenSeg exported model is NOT baked in: mount it at /weights
 # (openseg_colab/exported_model = gs://cloud-tpu-checkpoints/detection/projects/openseg/colab/exported_model,
 # the model the OpenScene README points to besides its Google Drive copy).
-ARG CUDA_RUNTIME=nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
-FROM ${CUDA_RUNTIME}
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
 ARG UV_VERSION=0.9.18
 ARG OPENSCENE_GIT_SHA=unknown
 # openlex3d/openlex3d, the toolbox the converter ships in (the commit the evaluator is pinned at).
@@ -47,7 +50,7 @@ RUN uv python install 3.9 \
         --index-url https://download.pytorch.org/whl/cpu \
         --extra-index-url https://pypi.org/simple \
         --index-strategy unsafe-best-match \
-        torch==2.5.1+cpu tensorflow==2.15.1 numpy==1.26.4 imageio==2.36.1 \
+        torch==2.5.1+cpu "tensorflow[and-cuda]==2.15.1" numpy==1.26.4 imageio==2.36.1 \
         opencv-python-headless==4.10.0.84 plyfile==1.1 open3d==0.19.0 scipy==1.13.1 tqdm==4.67.1 \
         seaborn==0.13.2 scikit-learn==1.5.2 omegaconf==2.3.0 pyyaml==6.0.2 \
     && uv cache clean
