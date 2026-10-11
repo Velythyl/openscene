@@ -21,7 +21,9 @@ we use the multi-view 2D fused features". What runs, upstream code unmodified
    vertices via plyfile, ``coords = v[:, :3]``, ``colors = v[:, -3:] / 127.5 - 1``,
    labels 255, saved as ``<scene>.pth``.
 2. 2D input: ``scripts/preprocess/preprocess_2d_replica.py``'s ``process_one_scene``
-   (re-stated): every ``stride``-th frame (``files[::10]``), RGB and depth resized to
+   (re-stated): every ``stride``-th frame from ``frame_offset`` (Replica:
+   ``files[::10]``), or the frames a ``frame_list`` file under /input names, RGB and
+   depth resized to
    ``img_dim`` with cv2 INTER_LINEAR, written as ``color/<i>.jpg`` / ``depth/<i>.png``
    with imageio, the pose as ``pose/<i>.txt``, and the intrinsics adjusted by
    ``adjust_intrinsic`` into ``intrinsics.txt``.
@@ -73,8 +75,12 @@ WEIGHTS = Path(os.environ.get("OPENSCENE_WEIGHTS", "/weights"))
 SCHEMA = "ragmap.openscene/v1"
 
 DEFAULTS = {
-    # preprocess_2d_replica.py: sample_freq = 10 ("intervals of 10 frames").
+    # preprocess_2d_replica.py: sample_freq = 10 ("intervals of 10 frames"), from the first frame.
     "openscene.stride": "10",
+    "openscene.frame_offset": "0",
+    # An explicit frame selection instead of stride/offset: a file under /input listing
+    # contract frame indices (one per line). Empty: stride/offset.
+    "openscene.frame_list": "",
     # replica_openseg.py main(): img_dim (640, 360) (= preprocess_2d_replica.py's).
     "openscene.img_dim": "640x360",
     # replica_openseg.py main(): visibility_threshold 0.25, cut_num_pixel_boundary 10.
@@ -166,9 +172,22 @@ def prepare_3d(cloud: Path, out_pth: Path) -> dict:
             "color_properties": names[-3:]}
 
 
-def prepare_2d(input_dir: Path, frames: list[dict], poses: dict, meta: dict, stride: int,
+def select_frames(frames: list[dict], stride: int, offset: int, frame_list: Path | None) -> list[dict]:
+    """``files[offset::stride]`` (preprocess_2d_replica.py: ``files[::10]``), or an explicit list."""
+
+    if frame_list is None:
+        return frames[offset::stride]
+    wanted = [int(line) for line in frame_list.read_text().split() if line.strip()]
+    by_index = {int(frame["frame_index"]): frame for frame in frames}
+    missing = [i for i in wanted if i not in by_index]
+    if missing:
+        raise RuntimeError(f"{frame_list} names frames the input lacks: {missing[:5]}")
+    return [by_index[i] for i in sorted(set(wanted))]
+
+
+def prepare_2d(input_dir: Path, chosen: list[dict], frames_in: int, poses: dict, meta: dict,
                img_dim: tuple[int, int], out_dir: Path) -> dict:
-    """preprocess_2d_replica.py, for one scene: every `stride`-th frame, resized to img_dim."""
+    """preprocess_2d_replica.py, for one scene: the chosen frames, resized to img_dim."""
 
     import cv2
     import imageio
@@ -184,7 +203,6 @@ def prepare_2d(input_dir: Path, frames: list[dict], poses: dict, meta: dict, str
     scene_dir = out_dir / "scene"
     for sub in ("color", "depth", "pose"):
         (scene_dir / sub).mkdir(parents=True, exist_ok=True)
-    chosen = frames[::stride]
     for img_id, frame in enumerate(chosen):
         img = imageio.v3.imread(str(input_dir / frame["rgb"]))
         img = cv2.resize(img, img_dim, interpolation=cv2.INTER_LINEAR)
@@ -193,7 +211,8 @@ def prepare_2d(input_dir: Path, frames: list[dict], poses: dict, meta: dict, str
         depth = cv2.resize(depth, img_dim, interpolation=cv2.INTER_LINEAR)
         imageio.imwrite(str(scene_dir / "depth" / f"{img_id}.png"), depth)
         np.savetxt(scene_dir / "pose" / f"{img_id}.txt", np.asarray(poses[str(frame["frame_index"])], dtype=np.float64))
-    return {"frames_in": len(frames), "frames_fused": len(chosen), "stride": stride, "img_dim": list(img_dim),
+    return {"frames_in": frames_in, "frames_fused": len(chosen), "img_dim": list(img_dim),
+            "frame_indices": [int(frame["frame_index"]) for frame in chosen],
             "original_dim": list(original), "intrinsics": intrinsics.tolist(),
             "first": Path(chosen[0]["rgb"]).name, "last": Path(chosen[-1]["rgb"]).name}
 
@@ -324,7 +343,11 @@ def _main(args, run: dict) -> None:
     pth = work / "replica_3d" / "scene.pth"
     t0 = time.time()
     run["prepare_3d"] = prepare_3d(cloud, pth)
-    run["prepare_2d"] = prepare_2d(input_dir, frames, poses, meta, stride, img_dim, work / "replica_2d")
+    offset = int(config["openscene.frame_offset"])
+    frame_list = input_dir / config["openscene.frame_list"] if config["openscene.frame_list"] else None
+    chosen = select_frames(frames, stride, offset, frame_list)
+    run["selection"] = {"stride": stride, "offset": offset, "frame_list": config["openscene.frame_list"] or None}
+    run["prepare_2d"] = prepare_2d(input_dir, chosen, len(frames), poses, meta, img_dim, work / "replica_2d")
     run["timings"]["prepare_s"] = round(time.time() - t0, 2)
     print(f"[ragmap] prepared {run['prepare_3d']['points']} points, {run['prepare_2d']['frames_fused']} frames "
           f"at {img_dim}", flush=True)
